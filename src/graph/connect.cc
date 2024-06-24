@@ -677,7 +677,7 @@ ncclResult_t ncclTopoPostset(struct ncclComm* comm, int* firstRanks, int* treePa
     minNchannels = std::min(64, maxChannels);
   }
    if (comm->nRanks < 8 && 64 < minNchannels) {
-    minNchannels = 64;
+    minNchannels = 2;
     WARN("NCCL_MIN_NCHANNELS set by environment is ignored due to less than 8 GPUs.");
   }
 

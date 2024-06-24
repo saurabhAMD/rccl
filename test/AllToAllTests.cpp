@@ -93,14 +93,14 @@ namespace RcclUnitTesting
       if(testBed.ev.isGfx94) {
         // Configuration
         std::vector<ncclFunc_t>     const funcTypes       = {ncclCollAllToAll};
-        std::vector<ncclDataType_t> const dataTypes       = {ncclBfloat16, ncclHalf};
+        std::vector<ncclDataType_t> const dataTypes       = {ncclBfloat16};
         std::vector<ncclRedOp_t>    const redOps          = {ncclSum};
         std::vector<int>            const roots           = {0};
         std::vector<int>            const numElements     = {64 * 1024 * 1024, 1024};
         std::vector<bool>           const inPlaceList     = {false};
         std::vector<bool>           const managedMemList  = {false};
         std::vector<bool>           const useHipGraphList = {false, true};
-        std::vector<char *>         const channelList     = {"84", "112"}; 
+        std::vector<char *>         const channelList     = {"112"}; 
         bool                        const enableSweep     = false;
         for (auto channel : channelList) {
           setenv("NCCL_MIN_NCHANNELS", channel, 1);

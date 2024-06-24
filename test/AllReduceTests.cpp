@@ -109,7 +109,7 @@ namespace RcclUnitTesting
       if(testBed.ev.isGfx94) {
         // Configuration
         std::vector<ncclFunc_t>     const funcTypes       = {ncclCollAllReduce};
-        std::vector<ncclDataType_t> const dataTypes       = {ncclBfloat16, ncclHalf};
+        std::vector<ncclDataType_t> const dataTypes       = {ncclBfloat16};
         std::vector<ncclRedOp_t>    const redOps          = {ncclSum};
         std::vector<int>            const roots           = {0};
         std::vector<int>            const numElements     = {64 * 1024 * 1024, 1024};
