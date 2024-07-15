@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <mpi.h>
+#include <fstream>
 
 #include "rcclReplayer.hpp"
 
@@ -80,6 +81,10 @@ int main(int argc, char **argv)
   printf("Rank %d Done setting up communicators\n", mpiRank);
 
   int numSkippedCalls = 0;
+  double runTime;
+  std::ofstream datafile;
+  datafile.open("replayer_data.csv");
+  datafile << "callNumber, functionName, inPlace, count(numElements), datatype, op, root, time(msec), BusBandwidth(GB/s)\n";
   auto start = std::chrono::high_resolution_clock::now();
   for (size_t i = 0; i < collCalls.groupCalls.size(); i++) {
     MPI_Barrier(MPI_COMM_WORLD);
@@ -89,7 +94,10 @@ int main(int argc, char **argv)
         printf("Running Collective Call %lu of %lu\n", i+1, collCalls.groupCalls.size());
         PrintGroupCall(collCalls.groupCalls[i]);
       }
-      ReplayRccl(collCalls, i);
+      double runTime = ReplayRccl(collCalls, i);
+      if (mpiRank == 0) {
+        dataToCsv(collCalls.groupCalls[i], datafile, runTime);
+      }
     } else {
       if (mpiRank == 0) {
         printf("[ERROR] in group call: (skipping...)\n");
@@ -107,6 +115,7 @@ int main(int argc, char **argv)
   }
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> duration = end - start;
+  datafile.close();
 
   // Destroy all communicators
   for (int commIdx = 0; commIdx < collCalls.numCommsPerRank; commIdx++) {
@@ -137,13 +146,30 @@ void PrintGroupCall(GroupCall const& gc)
     for (int task = 0; task < rd.second.tasks.size(); task++) {
       TaskInfo ti = rd.second.tasks[task];
       std::string funcName = (ti.funcType == ncclCollSend || ti.funcType == ncclCollRecv) ? "Send/Recv" : ncclFuncNames[ti.funcType];
-      std::tuple<std::string, size_t, int, int> key(funcName, ti.count, ti.datatype, ti.op);
+      std::tuple<std::string, size_t, int, int> key(funcName, ti.count, ti.datatype, ti.op); //TODO: it was present but I feel it is not needed as it isn't getting used anywhere.
       printf("  - Task %02d: %32s inPlace=%d count=%lu datatype=%d op=%d root=%d\n",
              task, funcName.c_str(), ti.inPlace, ti.count, ti.datatype, ti.op, ti.root);
     }
   }
 }
 
+
+void dataToCsv(GroupCall const& gc, std::ofstream &datafile, double runTime)
+{
+  auto rd = *(gc.rankData.begin());
+  TaskInfo ti = rd.second.tasks[0];
+  std::string funcName = (ti.funcType == ncclCollSend || ti.funcType == ncclCollRecv) ? "Send/Recv" : ncclFuncNames[ti.funcType];
+  double n = (double) (ti.count);
+  double S = (double) (n * (double)DataTypeToBytes(ti.datatype));
+  double t = (double) (runTime/1000); //milliseconds to seconds
+  double busBw = (S/t);
+  if (funcName == "AllReduce") busBw *= (2*(n- 1)/n);
+  else if (funcName == "ReduceScatter" || funcName == "AllGather") busBw *= ((n-1)/n);
+  busBw /= (1024 * 1024 * 1024); //in gb/s
+  std::string dataTypeName = DataTypeToName(ti.datatype);
+  std::string redOp = getRedOp(ti.op);
+  datafile << gc.opCount << ", " << funcName.c_str() << ", " << ti.inPlace << ", " << ti.count << ", " << dataTypeName << ", " << redOp << ", " << ti.root << ", " << runTime << ", " << busBw << "\n";
+}
 
 void ParseCollectives(char const* logFilename, bool isFirstRank, CollectiveCalls& cc)
 {
@@ -308,7 +334,7 @@ bool ParseLineItem(char const* line, LineItem& li)
                 &li.nRanks, &li.stream, &li.task, &li.globalRank) == 17;
 }
 
-void ReplayRccl(CollectiveCalls const& cc, int groupIdx)
+double ReplayRccl(CollectiveCalls const& cc, int groupIdx)
 {
   int numLocalRanks = cc.localRankComms.size();
 
@@ -356,6 +382,7 @@ void ReplayRccl(CollectiveCalls const& cc, int groupIdx)
   }
 
   // Execute the collective call (task)
+  double runTime;
   NCCL_CALL(ncclGroupStart());
   for (int localIdx = 0; localIdx < numLocalRanks; localIdx++) {
     int globalRank = cc.firstGlobalRank + localIdx;
@@ -366,7 +393,8 @@ void ReplayRccl(CollectiveCalls const& cc, int groupIdx)
     int commIdx = rankData.commIdx;
     for (int taskId = 0; taskId < numTasks; taskId++) {
       TaskInfo const& task = rankData.tasks[taskId];
-      ExecuteCollective(task, cc.localRankComms[localIdx][commIdx], cc.localRankStreams[localIdx][commIdx],
+      // printf("groupIdx = %d, collExecuteIdx = %d, localIdx = %d, commIdx = %d, taskId = %d, numLocalRanks = %d\n", groupIdx, collExecuteIdx, localIdx, commIdx, taskId, numLocalRanks);
+      runTime = ExecuteCollective(task, cc.localRankComms[localIdx][commIdx], cc.localRankStreams[localIdx][commIdx],
                         sendbuff[localIdx][taskId],
                         recvbuff[localIdx][taskId]);
     }
@@ -389,6 +417,7 @@ void ReplayRccl(CollectiveCalls const& cc, int groupIdx)
       if (!task.inPlace) HIP_CALL(hipFree(recvbuff[localIdx][taskId]));
     }
   }
+  return runTime;
 }
 
 // GetSize will return a pair of bytes where first element in pair represents bytesSent and the second bytesRecv
@@ -419,41 +448,57 @@ std::pair<size_t, size_t> GetSize(TaskInfo taskInfo, int numGlobalRanks) {
   return std::make_pair(sendNumBytes, recvNumBytes);
 }
 
-void ExecuteCollective(TaskInfo const& task, ncclComm_t const& comm, hipStream_t stream, const void *sendbuff, void *recvbuff)
+double ExecuteCollective(TaskInfo const& task, ncclComm_t const& comm, hipStream_t stream, const void *sendbuff, void *recvbuff)
 {
+  std::chrono::time_point start = std::chrono::high_resolution_clock::now();
   switch (task.funcType) {
   case ncclCollAllGather:
     NCCL_CALL(ncclAllGather(sendbuff, recvbuff, task.count, task.datatype, comm, stream));
+    // printf("Collective algorithm = AllGather\n");
     break;
   case ncclCollAllReduce:
     NCCL_CALL(ncclAllReduce(sendbuff, recvbuff, task.count, task.datatype, task.op, comm, stream));
+    // printf("Collective algorithm = AllReduce\n");
     break;
   case ncclCollBroadcast:
     NCCL_CALL(ncclBroadcast(sendbuff, recvbuff, task.count, task.datatype, task.root, comm, stream));
+    // printf("Collective algorithm = Broadcast\n");
     break;
   case ncclCollReduce:
     NCCL_CALL(ncclReduce(sendbuff, recvbuff, task.count, task.datatype, task.op, task.root, comm, stream));
+    // printf("Collective algorithm = Reduce\n");
     break;
   case ncclCollReduceScatter:
     NCCL_CALL(ncclReduceScatter(sendbuff, recvbuff, task.count, task.datatype, task.op, comm, stream));
+    // printf("Collective algorithm = ReduceScatter\n");
     break;
   case ncclCollGather:
     NCCL_CALL(ncclGather(sendbuff, recvbuff, task.count, task.datatype, task.root, comm, stream));
+    // printf("Collective algorithm = Gather\n");
     break;
   case ncclCollScatter:
     NCCL_CALL(ncclScatter(sendbuff, recvbuff, task.count, task.datatype, task.root, comm, stream));
+    // printf("Collective algorithm = Scatter\n");
     break;
   case ncclCollAllToAll:
     NCCL_CALL(ncclAllToAll(sendbuff, recvbuff, task.count, task.datatype, comm, stream));
+    // printf("Collective algorithm = AllToAll\n");
     break;
   case ncclCollSend:
     NCCL_CALL(ncclSend(sendbuff, task.count, task.datatype, task.root, comm, stream));
+    // printf("Collective algorithm = CollSend\n");
     break;
   case ncclCollRecv:
     NCCL_CALL(ncclRecv(recvbuff, task.count, task.datatype, task.root, comm, stream));
+    // printf("Collective algorithm = CollRecv\n");
     break;
   default:
     printf("Error: unsupported collective\n");
     exit(1);
   }
+  std::chrono::time_point end = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double> duration = end - start;
+  double runTime = duration.count();
+  runTime *= 1000; //convering into milliseconds
+  return runTime;
 }
