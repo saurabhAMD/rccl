@@ -84,7 +84,7 @@ int main(int argc, char **argv)
   double runTime;
   std::ofstream datafile;
   datafile.open("replayer_data.csv");
-  datafile << "callNumber, functionName, inPlace, count(numElements), datatype, op, root, time(msec), BusBandwidth(GB/s)\n";
+  datafile << "callNumber, functionName, inPlace, count(numElements), datatype, op, root, time(msec), groupCallBusBandwidth(GB/s)\n";
   auto start = std::chrono::high_resolution_clock::now();
   for (size_t i = 0; i < collCalls.groupCalls.size(); i++) {
     MPI_Barrier(MPI_COMM_WORLD);
@@ -382,7 +382,7 @@ double ReplayRccl(CollectiveCalls const& cc, int groupIdx)
   }
 
   // Execute the collective call (task)
-  double runTime;
+  std::chrono::time_point start = std::chrono::high_resolution_clock::now();
   NCCL_CALL(ncclGroupStart());
   for (int localIdx = 0; localIdx < numLocalRanks; localIdx++) {
     int globalRank = cc.firstGlobalRank + localIdx;
@@ -394,7 +394,7 @@ double ReplayRccl(CollectiveCalls const& cc, int groupIdx)
     for (int taskId = 0; taskId < numTasks; taskId++) {
       TaskInfo const& task = rankData.tasks[taskId];
       // printf("groupIdx = %d, collExecuteIdx = %d, localIdx = %d, commIdx = %d, taskId = %d, numLocalRanks = %d\n", groupIdx, collExecuteIdx, localIdx, commIdx, taskId, numLocalRanks);
-      runTime = ExecuteCollective(task, cc.localRankComms[localIdx][commIdx], cc.localRankStreams[localIdx][commIdx],
+      ExecuteCollective(task, cc.localRankComms[localIdx][commIdx], cc.localRankStreams[localIdx][commIdx],
                         sendbuff[localIdx][taskId],
                         recvbuff[localIdx][taskId]);
     }
@@ -407,10 +407,17 @@ double ReplayRccl(CollectiveCalls const& cc, int groupIdx)
     if (cc.groupCalls[groupIdx].rankData.count(globalRank) == 0) continue;
 
     RankData const& rankData = cc.groupCalls[groupIdx].rankData.at(globalRank);
-    int numTasks = rankData.tasks.size();
     int commIdx = rankData.commIdx;
     HIP_CALL(hipStreamSynchronize(cc.localRankStreams[localIdx][commIdx]));
-
+  }
+  std::chrono::time_point end = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double> duration = (end - start);
+  double runTime = duration.count();
+  runTime *= 1000; //convering into milliseconds
+  for (int localIdx = 0; localIdx < numLocalRanks; localIdx++) {
+    int globalRank = cc.firstGlobalRank + localIdx;
+    RankData const& rankData = cc.groupCalls[groupIdx].rankData.at(globalRank);
+    int numTasks = rankData.tasks.size();
     for (int taskId = 0; taskId < numTasks; taskId++) {
       TaskInfo const& task = rankData.tasks[taskId];
       HIP_CALL(hipFree(sendbuff[localIdx][taskId]));
@@ -448,9 +455,8 @@ std::pair<size_t, size_t> GetSize(TaskInfo taskInfo, int numGlobalRanks) {
   return std::make_pair(sendNumBytes, recvNumBytes);
 }
 
-double ExecuteCollective(TaskInfo const& task, ncclComm_t const& comm, hipStream_t stream, const void *sendbuff, void *recvbuff)
+void ExecuteCollective(TaskInfo const& task, ncclComm_t const& comm, hipStream_t stream, const void *sendbuff, void *recvbuff)
 {
-  std::chrono::time_point start = std::chrono::high_resolution_clock::now();
   switch (task.funcType) {
   case ncclCollAllGather:
     NCCL_CALL(ncclAllGather(sendbuff, recvbuff, task.count, task.datatype, comm, stream));
@@ -496,9 +502,4 @@ double ExecuteCollective(TaskInfo const& task, ncclComm_t const& comm, hipStream
     printf("Error: unsupported collective\n");
     exit(1);
   }
-  std::chrono::time_point end = std::chrono::high_resolution_clock::now();
-  std::chrono::duration<double> duration = end - start;
-  double runTime = duration.count();
-  runTime *= 1000; //convering into milliseconds
-  return runTime;
 }
