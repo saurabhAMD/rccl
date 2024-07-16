@@ -211,4 +211,4 @@ void dataToCsv(GroupCall const& gc, std::ofstream &datafile, double runTime);
 std::pair<size_t, size_t> GetSize(TaskInfo taskInfo, int numGlobalRanks);
 
 // executes the collective call (task)
-double ExecuteCollective(TaskInfo const& task, ncclComm_t const& comm, hipStream_t stream, const void *sendbuff, void *recvbuff);
+void ExecuteCollective(TaskInfo const& task, ncclComm_t const& comm, hipStream_t stream, const void *sendbuff, void *recvbuff);
