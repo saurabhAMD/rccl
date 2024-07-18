@@ -185,7 +185,7 @@ ncclFunc_t GetFuncType(char* func)
 {
   for (int i = 0; i < ncclNumFuncs; i++)
     if (!strcmp(func, ncclFuncNames[i])) return (ncclFunc_t)i;
-  printf("[ERROR] Unrecognzied func %s\n", func);
+  printf("[ERROR] Unrecognized func %s\n", func);
   exit(1);
 }
 
