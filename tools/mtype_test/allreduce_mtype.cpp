@@ -103,6 +103,49 @@ __global__ void allred7Peer(float* in, float *out, float* peer1, float* peer2, f
 
 }
 
+__global__ void allred2Peer(float* in, float *out, float* peer1, int* done, int *flag, kernelParam kp, int myrank, int nranks, int iter)
+{
+    int num = hipThreadIdx_x + hipBlockDim_x * hipBlockIdx_x;
+	int tid = hipThreadIdx_x;
+
+	/* sync before starting the reduction */
+	if (tid < nranks) {
+		if (hipBlockIdx_x == 0 && tid == 0) {
+			flag[myrank] = iter;
+#pragma unroll
+			for (int j=0; j < (nranks-1); j++) {
+				__atomic_store_n(&(((int*) kp.ptrs_flag[j])[myrank]), iter, __ATOMIC_RELEASE);
+			}	
+		}
+		/* atomic load serializes the reads among the threads. Also, flag is uncached. */
+		while(__atomic_load_n(&flag[tid], __ATOMIC_ACQUIRE) != iter) {}
+	}
+	__syncthreads();
+
+
+	float sum;
+	for (int i = num; i < N; i+= hipBlockDim_x * hipGridDim_x) {
+		sum = in[i];
+		sum += peer1[i];
+		out[i] = sum;
+	}
+
+	/* sync after finishing the reduction */
+	if (tid < nranks) {
+                if (hipBlockIdx_x == 0 && tid == 0) {
+                        done[myrank] = iter;
+#pragma unroll
+                        for (int j=0; j < (nranks-1); j++) {
+                __atomic_store_n(&(((int*) kp.ptrs_done[j])[myrank]), iter, __ATOMIC_RELEASE);
+                        }
+                }
+
+                while(__atomic_load_n(&done[tid], __ATOMIC_ACQUIRE) != iter) {}
+        }
+        __syncthreads();
+
+}
+
 int main(int argc, char* argv[])
 {
 
@@ -218,27 +261,34 @@ int main(int argc, char* argv[])
     t1 = std::chrono::high_resolution_clock::now();
      
     /* Allreduce using read */
-    for (int iter = 10; iter < 11; iter++) {	
-	    hipLaunchKernelGGL(allred7Peer,
-            dim3(min(32,(N)/256)),
-            dim3(256),
-            0, stream, 
-            inputBuffer, outputBuffer, (float*)(kp.ptrs[0]), (float*)(kp.ptrs[1]), (float*)(kp.ptrs[2]),
-                (float*)(kp.ptrs[3]), (float*)(kp.ptrs[4]), (float*)(kp.ptrs[5]), (float*)(kp.ptrs[6]), doneBuffer,
-                flagBuffer, kp, myrank, nranks, iter+1);
+    for (int iter = 0; iter < 1; iter++) {	
+    // hipLaunchKernelGGL(allred7Peer,
+    //     dim3(min(32,(N)/256)),
+    //     dim3(256),
+    //     0, stream, 
+    //     inputBuffer, outputBuffer, (float*)(kp.ptrs[0]), (float*)(kp.ptrs[1]), (float*)(kp.ptrs[2]),
+    //         (float*)(kp.ptrs[3]), (float*)(kp.ptrs[4]), (float*)(kp.ptrs[5]), (float*)(kp.ptrs[6]), doneBuffer,
+    //         flagBuffer, kp, myrank, nranks, iter+1);
+    hipLaunchKernelGGL(allred2Peer,
+        dim3(min(32,(N)/256)),
+        dim3(256),
+        0, stream, 
+        inputBuffer, outputBuffer, (float*)(kp.ptrs[0]), doneBuffer,
+            flagBuffer, kp, myrank, nranks, iter+1);
     }
     hipStreamSynchronize(stream);
 
     t2 = std::chrono::high_resolution_clock::now();
     double times =  std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count();
-    times = times/100;
+    // times = times/100;
     double out;
 
     /* Get the avg time among ranks */
     MPI_Allreduce(&times, &out, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     
     if (myrank == 0) 
-    	cout<< "Allred time for 8 ranks = " << out/nranks << " data size = " << N*sizeof(float) << endl; //checks performance
+    	//cout<< "Allred time for 8 ranks = " << out/nranks << " data size = " << N*sizeof(float) << endl; //checks performance
+        cout<< "Allred time for 2 ranks = " << out/nranks << " data size = " << N*sizeof(float) << endl; //checks performance
 
 
     hipMemcpy(output, outputBuffer, N * sizeof(float), hipMemcpyDeviceToHost);
